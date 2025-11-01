@@ -1,0 +1,58 @@
+nvironnements virtuels
+venv/
+.env/
+__pycache__/
+
+# Fichiers temporaires Python
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Fichiers système
+.DS_Store
+
+# Données volumineuses
+*.npy
+*.h5
+data/processed/
+  UW PICO 5.09                    File: .gitignore                    Modified
+
+nvironnements virtuels
+venv/
+.env/
+__pycache__/
+
+# Fichiers temporaires Python
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Fichiers système
+.DS_Store
+
+# Données volumineuses
+*.npy
+*.h5
+data/processed/
+# Environnements virtuels
+venv/
+# Environnements virtuels
+venv/
+.env/
+__pycache__/
+
+# Fichiers temporaires Python
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Fichiers système
+.DS_Store
+
+# Données volumineuses
+*.npy
+*.h5
+data/processed/
