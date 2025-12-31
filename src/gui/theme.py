@@ -1,37 +1,30 @@
 """
 Theme configuration for the PMI application.
-Aeronautical-inspired color palette with dark mode.
 """
 
 # Color Palette
 COLORS = {
-    # Primary colors
-    "primary": "#1E88E5",           # Aviation blue
+    "primary": "#1E88E5",
     "primary_hover": "#1565C0",
     "primary_dark": "#0D47A1",
     
-    # Background colors
-    "bg_dark": "#1A1A2E",           # Deep navy
-    "bg_medium": "#16213E",         # Dark blue-gray
-    "bg_light": "#0F3460",          # Lighter panel
-    "bg_card": "#1F2940",           # Card background
+    "bg_dark": "#1A1A2E",
+    "bg_medium": "#16213E",
+    "bg_light": "#0F3460",
+    "bg_card": "#1F2940",
     
-    # Accent colors
-    "accent": "#E94560",            # Warning/accent red
-    "success": "#00C853",           # Success green
-    "warning": "#FFB300",           # Warning yellow
+    "accent": "#E94560",
+    "success": "#00C853",
+    "warning": "#FFB300",
     
-    # Text colors
     "text_primary": "#FFFFFF",
     "text_secondary": "#B0BEC5",
     "text_muted": "#607D8B",
     
-    # Border colors
     "border": "#2D3A4F",
     "border_active": "#1E88E5",
 }
 
-# Typography
 FONTS = {
     "title": ("Segoe UI", 24, "bold"),
     "heading": ("Segoe UI", 16, "bold"),
@@ -40,7 +33,6 @@ FONTS = {
     "mono": ("Consolas", 11),
 }
 
-# Spacing
 PADDING = {
     "xs": 4,
     "sm": 8,
@@ -49,24 +41,34 @@ PADDING = {
     "xl": 32,
 }
 
-# Simulation types configuration
-SIMULATION_TYPES = {
+# Data sources for Step 1
+DATA_SOURCES = {
     "cfd": {
-        "name": "CFD",
-        "description": "Computational Fluid Dynamics\nANSYS Fluent data",
+        "name": "CFD (Fluent)",
+        "description": "Import field data from ANSYS Fluent simulations",
         "color": "#1E88E5",
         "enabled": True,
     },
     "pinns": {
         "name": "PINNs",
-        "description": "Physics-Informed Neural Networks\nPhysics-constrained learning",
+        "description": "Generate fields using Physics-Informed Neural Networks",
         "color": "#9C27B0",
         "enabled": True,
     },
     "lstm": {
         "name": "LSTM",
-        "description": "Long Short-Term Memory\nTime-series prediction",
+        "description": "Predict field sequences (Coming Soon)",
         "color": "#FF9800",
         "enabled": False,
+    },
+}
+
+# Prediction methods for Step 2
+PREDICTION_METHODS = {
+    "cnn": {
+        "name": "CNN Prediction",
+        "description": "Predict CL/CD from field data using Convolutional Neural Network",
+        "color": "#00C853",
+        "enabled": True,
     },
 }

@@ -12,12 +12,12 @@ __pycache__/
 # Fichiers système
 .DS_Store
 
-# Données volumineuses (CFD)
-data/raw/*/fields.csv
-data/raw/*/*.h5
+# Données source et générées
+data/raw/
+data/processed/
+
+# Modèles et fichiers volumineux
 *.npy
 *.h5
 *.keras
-
-# Dossier processed (généré automatiquement)
-data/processed/
+*.out
