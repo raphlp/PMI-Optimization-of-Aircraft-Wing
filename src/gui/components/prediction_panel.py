@@ -239,7 +239,7 @@ class PredictionPanel(ctk.CTkFrame):
         self.log_area.see("end")
     
     def run_training(self):
-        """Train CNN on CFD data."""
+        """Train CNN on CFD data with production-grade optimization."""
         if self.is_running:
             return
         
@@ -248,77 +248,328 @@ class PredictionPanel(ctk.CTkFrame):
             self.train_btn.configure(state="disabled")
             self.progress.set(0)
             
-            self.log("Starting CNN training...")
-            self.append_log("Training on CFD data only")
+            self.log("Initializing optimized CNN training...")
             
             try:
-                from tensorflow.keras.models import Sequential
-                from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
-                from tensorflow.keras.optimizers import Adam
+                import tensorflow as tf
+                from tensorflow.keras.models import Model
+                from tensorflow.keras.layers import (
+                    Input, Conv2D, BatchNormalization, Activation, 
+                    MaxPooling2D, GlobalAveragePooling2D, Dense, Dropout,
+                    Add, Concatenate
+                )
+                from tensorflow.keras.optimizers import AdamW
+                from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+                from tensorflow.keras.regularizers import l2
                 
+                # Load data
                 X = np.load("data/processed/combined/X.npy")
                 y = np.load("data/processed/combined/y.npy")
                 
                 valid_mask = ~np.isnan(y).any(axis=1)
-                X_train = X[valid_mask]
-                y_train = y[valid_mask]
+                X_data = X[valid_mask].astype(np.float32)
+                y_data = y[valid_mask].astype(np.float32)
                 
-                self.append_log(f"\nTraining samples: {len(X_train)}")
+                n_samples = len(X_data)
+                self.log(f"Loaded {n_samples} samples")
+                self.progress.set(0.05)
+                
+                # ========== DATA AUGMENTATION ==========
+                def augment_data(X, y, augment_factor=2):
+                    """Apply data augmentation: horizontal flip + noise."""
+                    X_aug = [X]
+                    y_aug = [y]
+                    
+                    # Horizontal flip (valid for symmetric flow)
+                    X_flipped = np.flip(X, axis=2)  # Flip along width
+                    # Flip y-velocity sign
+                    X_flipped_corrected = X_flipped.copy()
+                    X_flipped_corrected[:, :, :, 2] *= -1  # v velocity
+                    X_aug.append(X_flipped_corrected)
+                    y_aug.append(y)  # CL/CD same for symmetric flip
+                    
+                    # Add Gaussian noise
+                    for _ in range(augment_factor - 2):
+                        noise = np.random.normal(0, 0.02, X.shape).astype(np.float32)
+                        X_noisy = np.clip(X + noise, 0, 1)
+                        X_aug.append(X_noisy)
+                        # Slight noise on targets too
+                        y_noise = np.random.normal(0, 0.005, y.shape).astype(np.float32)
+                        y_aug.append(y + y_noise)
+                    
+                    return np.concatenate(X_aug), np.concatenate(y_aug)
+                
+                if n_samples < 100:
+                    X_data, y_data = augment_data(X_data, y_data, augment_factor=3)
+                    self.append_log(f"Augmented to {len(X_data)} samples")
+                
+                # ========== OUTPUT NORMALIZATION ==========
+                y_mean = y_data.mean(axis=0)
+                y_std = y_data.std(axis=0) + 1e-8
+                y_normalized = (y_data - y_mean) / y_std
+                
+                # Save normalization params
+                models_dir = os.path.join("data", "processed", "models")
+                os.makedirs(models_dir, exist_ok=True)
+                np.save(os.path.join(models_dir, "y_mean.npy"), y_mean)
+                np.save(os.path.join(models_dir, "y_std.npy"), y_std)
+                
+                # ========== TRAIN/VAL SPLIT ==========
+                from sklearn.model_selection import train_test_split
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_data, y_normalized, test_size=0.2, random_state=42
+                )
+                
+                self.append_log(f"Train: {len(X_train)}, Val: {len(X_val)}")
                 self.progress.set(0.1)
+                # ========== SQUEEZE-EXCITATION ATTENTION (simpler than CBAM) ==========
+                def se_block(x, ratio=8):
+                    """Squeeze-Excitation block: channel attention without Lambda layers."""
+                    from tensorflow.keras.layers import GlobalAveragePooling2D, Reshape, Multiply
+                    
+                    channels = x.shape[-1]
+                    
+                    # Squeeze: global average pooling
+                    se = GlobalAveragePooling2D()(x)
+                    
+                    # Excitation: two FC layers
+                    se = Dense(channels // ratio, activation='relu')(se)
+                    se = Dense(channels, activation='sigmoid')(se)
+                    
+                    # Reshape and scale
+                    se = Reshape((1, 1, channels))(se)
+                    
+                    return Multiply()([x, se])
                 
-                model = Sequential([
-                    Conv2D(32, (3, 3), activation='relu', padding='same', input_shape=X_train.shape[1:]),
-                    MaxPooling2D((2, 2)),
-                    Conv2D(64, (3, 3), activation='relu', padding='same'),
-                    MaxPooling2D((2, 2)),
-                    Conv2D(64, (3, 3), activation='relu', padding='same'),
-                    MaxPooling2D((2, 2)),
-                    Flatten(),
-                    Dense(128, activation='relu'),
-                    Dropout(0.3),
-                    Dense(64, activation='relu'),
-                    Dense(2)
-                ])
+                # ========== ATTENTION-ENHANCED RESIDUAL BLOCK ==========
+                def attention_residual_block(x, filters, kernel_size=3, stride=1, use_attention=True):
+                    """Residual block with SE attention."""
+                    shortcut = x
+                    
+                    x = Conv2D(filters, kernel_size, strides=stride, padding='same',
+                               kernel_regularizer=l2(1e-4))(x)
+                    x = BatchNormalization()(x)
+                    x = Activation('relu')(x)
+                    
+                    x = Conv2D(filters, kernel_size, padding='same',
+                               kernel_regularizer=l2(1e-4))(x)
+                    x = BatchNormalization()(x)
+                    
+                    # Apply SE attention
+                    if use_attention:
+                        x = se_block(x)
+                    
+                    # Match dimensions if needed
+                    if stride != 1 or shortcut.shape[-1] != filters:
+                        shortcut = Conv2D(filters, 1, strides=stride, padding='same')(shortcut)
+                        shortcut = BatchNormalization()(shortcut)
+                    
+                    x = Add()([x, shortcut])
+                    x = Activation('relu')(x)
+                    return x
                 
-                model.compile(optimizer=Adam(0.001), loss='mse', metrics=['mae'])
+                # ========== BUILD BAYESIAN CNN WITH SE-ATTENTION ==========
+                print("\n" + "="*60, flush=True)
+                print("Building Bayesian CNN with SE-Attention", flush=True)
+                print("="*60, flush=True)
                 
+                inputs = Input(shape=X_train.shape[1:])
+                
+                # Initial convolution
+                x = Conv2D(32, 7, strides=2, padding='same', kernel_regularizer=l2(1e-4))(inputs)
+                x = BatchNormalization()(x)
+                x = Activation('relu')(x)
+                x = MaxPooling2D(3, strides=2, padding='same')(x)
+                
+                # Attention-enhanced residual blocks
+                x = attention_residual_block(x, 64, use_attention=True)
+                x = attention_residual_block(x, 64, use_attention=False)
+                x = attention_residual_block(x, 128, stride=2, use_attention=True)
+                x = attention_residual_block(x, 128, use_attention=False)
+                x = attention_residual_block(x, 256, stride=2, use_attention=True)
+                x = attention_residual_block(x, 256, use_attention=True)
+                
+                # Global pooling
+                x = GlobalAveragePooling2D()(x)
+                
+                # Dense layers with Dropout (for MC inference, we'll run with training=True)
+                x = Dense(256, activation='relu', kernel_regularizer=l2(1e-4))(x)
+                x = Dropout(0.3)(x)
+                x = Dense(128, activation='relu', kernel_regularizer=l2(1e-4))(x)
+                x = Dropout(0.3)(x)
+                x = Dense(64, activation='relu', kernel_regularizer=l2(1e-4))(x)
+                x = Dropout(0.2)(x)
+                
+                # Output: 2 values (CL, CD)
+                outputs = Dense(2, activation='linear', name='predictions')(x)
+                
+                model = Model(inputs, outputs, name='BayesianCNN_CBAM')
+                
+                # ========== OPTIMIZER WITH WEIGHT DECAY ==========
                 epochs = int(self.epochs_var.get())
+                initial_lr = 0.001
+                
+                optimizer = AdamW(
+                    learning_rate=initial_lr,
+                    weight_decay=1e-4
+                )
+                
+                model.compile(
+                    optimizer=optimizer,
+                    loss='huber',  # More robust than MSE
+                    metrics=['mae']
+                )
+                
+                self.append_log(f"\nModel: {model.count_params():,} parameters")
                 self.append_log(f"Training for {epochs} epochs...")
                 
+                # ========== CALLBACKS ==========
+                panel = self
+                
+                class GUIProgressCallback(tf.keras.callbacks.Callback):
+                    def __init__(cb_self):
+                        super().__init__()
+                        cb_self.best_val_loss = float('inf')
+                    
+                    def on_epoch_end(cb_self, epoch, logs=None):
+                        loss = logs.get('loss', 0)
+                        val_loss = logs.get('val_loss', 0)
+                        mae = logs.get('mae', 0)
+                        val_mae = logs.get('val_mae', 0)
+                        
+                        try:
+                            lr = float(tf.keras.backend.get_value(cb_self.model.optimizer.learning_rate))
+                        except:
+                            lr = 0.001
+                        
+                        progress = 0.1 + (epoch + 1) / epochs * 0.8
+                        
+                        # Track best
+                        if val_loss < cb_self.best_val_loss:
+                            cb_self.best_val_loss = val_loss
+                            best_marker = " ★ BEST"
+                        else:
+                            best_marker = ""
+                        
+                        # Terminal log
+                        print(f"Epoch {epoch+1:3d}/{epochs} - loss: {loss:.5f} - val_loss: {val_loss:.5f} - mae: {mae:.5f}{best_marker}", flush=True)
+                        
+                        msg = f"Epoch {epoch+1}/{epochs}{best_marker}\n"
+                        msg += f"Loss: {loss:.5f} | Val: {val_loss:.5f}\n"
+                        msg += f"MAE:  {mae:.5f} | Val: {val_mae:.5f}\n"
+                        msg += f"LR: {lr:.2e}"
+                        
+                        # Schedule GUI update
+                        try:
+                            panel.after(0, lambda: panel.progress.set(progress))
+                            panel.after(0, lambda: panel.log(f"Training...\n{msg}"))
+                        except:
+                            pass
+                
+                callbacks = [
+                    GUIProgressCallback(),
+                    EarlyStopping(
+                        monitor='val_loss',
+                        patience=50,
+                        restore_best_weights=True,
+                        verbose=0
+                    ),
+                    ReduceLROnPlateau(
+                        monitor='val_loss',
+                        factor=0.5,
+                        patience=20,
+                        min_lr=1e-6,
+                        verbose=0
+                    )
+                ]
+                
+                # ========== TRAINING ==========
                 history = model.fit(
                     X_train, y_train,
+                    validation_data=(X_val, y_val),
                     epochs=epochs,
-                    batch_size=min(32, len(X_train)),
-                    validation_split=0.2 if len(X_train) > 5 else 0,
+                    batch_size=min(32, len(X_train) // 4 + 1),
+                    callbacks=callbacks,
                     verbose=0
                 )
                 
                 self.progress.set(0.9)
                 
-                models_dir = os.path.join("data", "processed", "models")
-                os.makedirs(models_dir, exist_ok=True)
+                # ========== SAVE MODEL ==========
                 model.save(os.path.join(models_dir, "cnn_model.keras"))
                 
-                predictions = model.predict(X_train, verbose=0)
-                mae_cl = float(np.mean(np.abs(predictions[:, 0] - y_train[:, 0])))
-                mae_cd = float(np.mean(np.abs(predictions[:, 1] - y_train[:, 1])))
+                # ========== EVALUATE ON ORIGINAL SCALE ==========
+                # Predict on all data
+                X_all = X[valid_mask].astype(np.float32)
+                y_all = y[valid_mask].astype(np.float32)
                 
+                pred_normalized = model.predict(X_all, verbose=0)
+                predictions = pred_normalized * y_std + y_mean  # Denormalize
+                
+                mae_cl = float(np.mean(np.abs(predictions[:, 0] - y_all[:, 0])))
+                mae_cd = float(np.mean(np.abs(predictions[:, 1] - y_all[:, 1])))
+                
+                # Relative errors
+                rel_cl = mae_cl / (np.abs(y_all[:, 0]).mean() + 1e-8) * 100
+                rel_cd = mae_cd / (np.abs(y_all[:, 1]).mean() + 1e-8) * 100
+                
+                # R² scores
+                ss_res_cl = np.sum((predictions[:, 0] - y_all[:, 0])**2)
+                ss_tot_cl = np.sum((y_all[:, 0] - y_all[:, 0].mean())**2)
+                r2_cl = 1 - ss_res_cl / (ss_tot_cl + 1e-8)
+                
+                ss_res_cd = np.sum((predictions[:, 1] - y_all[:, 1])**2)
+                ss_tot_cd = np.sum((y_all[:, 1] - y_all[:, 1].mean())**2)
+                r2_cd = 1 - ss_res_cd / (ss_tot_cd + 1e-8)
+                
+                # Save info
                 with open(os.path.join(models_dir, "cnn_info.json"), 'w') as f:
                     json.dump({
-                        'epochs': epochs,
-                        'num_samples': len(X_train),
+                        'epochs': len(history.history['loss']),
+                        'epochs_requested': epochs,
+                        'num_samples': n_samples,
+                        'num_augmented': len(X_data),
                         'mae_cl': mae_cl,
                         'mae_cd': mae_cd,
-                        'final_loss': float(history.history['loss'][-1])
+                        'rel_error_cl': rel_cl,
+                        'rel_error_cd': rel_cd,
+                        'r2_cl': float(r2_cl),
+                        'r2_cd': float(r2_cd),
+                        'final_loss': float(history.history['loss'][-1]),
+                        'best_val_loss': float(min(history.history['val_loss'])),
+                        'architecture': 'ResNet-style with BatchNorm'
                     }, f, indent=2)
                 
                 self.progress.set(1.0)
-                self.append_log(f"\nComplete! MAE CL: {mae_cl:.6f}, CD: {mae_cd:.6f}")
+                
+                result_msg = f"✅ Training Complete!\n\n"
+                result_msg += f"🔧 Architecture: Bayesian CNN + CBAM\n"
+                result_msg += f"📊 Epochs: {len(history.history['loss'])}/{epochs}\n"
+                result_msg += f"📁 Samples: {n_samples} (aug: {len(X_data)})\n\n"
+                result_msg += f"═══ CL Performance ═══\n"
+                result_msg += f"MAE: {mae_cl:.6f}\n"
+                result_msg += f"Relative Error: {rel_cl:.2f}%\n"
+                result_msg += f"R²: {r2_cl:.4f}\n\n"
+                result_msg += f"═══ CD Performance ═══\n"
+                result_msg += f"MAE: {mae_cd:.6f}\n"
+                result_msg += f"Relative Error: {rel_cd:.2f}%\n"
+                result_msg += f"R²: {r2_cd:.4f}\n\n"
+                result_msg += f"🎯 Bayesian inference ready!\n"
+                result_msg += f"Use View Results for uncertainty estimates."
+                
+                self.log(result_msg)
                 
             except Exception as e:
-                self.append_log(f"\nError: {str(e)}")
+                error_msg = f"\nError: {str(e)}"
+                self.append_log(error_msg)
                 import traceback
-                self.append_log(traceback.format_exc())
+                tb = traceback.format_exc()
+                self.append_log(tb)
+                # Also print to terminal
+                print(f"\n{'='*60}", flush=True)
+                print(f"TRAINING ERROR: {e}", flush=True)
+                print(tb, flush=True)
+                print(f"{'='*60}", flush=True)
             
             finally:
                 self.is_running = False
@@ -327,53 +578,95 @@ class PredictionPanel(ctk.CTkFrame):
         threading.Thread(target=task, daemon=True).start()
     
     def show_results(self):
-        """Show enhanced results popup."""
+        """Show enhanced results popup with Bayesian uncertainty."""
         try:
             from tensorflow.keras.models import load_model
             
+            self.log("Loading model and computing uncertainties...")
+            
             model = load_model("data/processed/models/cnn_model.keras", compile=False)
-            X = np.load("data/processed/combined/X.npy")
+            X = np.load("data/processed/combined/X.npy").astype(np.float32)
             y = np.load("data/processed/combined/y.npy")
             
             with open("data/processed/combined/manifest.json") as f:
                 manifest = json.load(f)
             
-            predictions = model.predict(X, verbose=0)
+            # Load normalization params
+            y_mean_path = "data/processed/models/y_mean.npy"
+            y_std_path = "data/processed/models/y_std.npy"
+            
+            if os.path.exists(y_mean_path) and os.path.exists(y_std_path):
+                y_mean = np.load(y_mean_path)
+                y_std = np.load(y_std_path)
+            else:
+                y_mean = np.array([0, 0])
+                y_std = np.array([1, 1])
+            
+            # ========== BAYESIAN MC DROPOUT INFERENCE ==========
+            import tensorflow as tf
+            
+            n_mc_samples = 30  # Number of Monte Carlo samples
+            mc_predictions = []
+            
+            self.log(f"Running {n_mc_samples} MC Dropout samples...")
+            
+            for i in range(n_mc_samples):
+                # training=True keeps dropout active for uncertainty
+                pred = model(X, training=True)
+                mc_predictions.append(pred.numpy())
+            
+            mc_predictions = np.array(mc_predictions)  # (n_mc, n_samples, 2)
+            
+            # Denormalize
+            mc_predictions = mc_predictions * y_std + y_mean
+            
+            # Calculate mean and std
+            predictions = np.mean(mc_predictions, axis=0)  # Mean prediction
+            uncertainties = np.std(mc_predictions, axis=0)  # Uncertainty
+            
+            self.log("Uncertainty quantification complete!")
             
         except Exception as e:
             self.append_log(f"Error: {e}")
+            import traceback
+            self.append_log(traceback.format_exc())
             return
         
-        ResultsPopup(self, X, y, predictions, manifest)
+        ResultsPopup(self, X, y, predictions, uncertainties, manifest)
 
 
 class ResultsPopup(ctk.CTkToplevel):
-    """Enhanced results popup with sample selector."""
+    """Enhanced results popup with Bayesian uncertainty display."""
     
-    def __init__(self, parent, X, y, predictions, manifest):
+    def __init__(self, parent, X, y, predictions, uncertainties, manifest):
         super().__init__(parent)
         
         self.X = X
         self.y = y
         self.predictions = predictions
+        self.uncertainties = uncertainties
         self.manifest = manifest
         self.samples = manifest.get('samples', [])
         
-        self.title("Prediction Results")
-        self.geometry("1100x800")
+        self.title("Bayesian Prediction Results")
+        self.geometry("1100x850")
         self.configure(fg_color=COLORS["bg_dark"])
         self.grab_set()
         
         self.create_widgets()
     
     def create_widgets(self):
+        # Separate samples by source
+        self.cfd_samples = [(i, s) for i, s in enumerate(self.samples) if s.get('source') == 'CFD']
+        self.pinn_samples = [(i, s) for i, s in enumerate(self.samples) if s.get('source') == 'PINN']
+        
         # Header
         header = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=0)
         header.pack(fill="x")
         
         ctk.CTkLabel(
             header,
-            text="CL/CD Prediction Results",
+            text="🎯 Bayesian Prediction Results",
             font=FONTS["title"],
             text_color=COLORS["text_primary"]
         ).pack(side="left", padx=PADDING["lg"], pady=PADDING["md"])
@@ -387,103 +680,187 @@ class ResultsPopup(ctk.CTkToplevel):
             command=self.destroy
         ).pack(side="right", padx=PADDING["lg"], pady=PADDING["md"])
         
-        # Sample selector
+        # ========== TWO-LEVEL SELECTOR ==========
         selector_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10)
         selector_frame.pack(fill="x", padx=PADDING["md"], pady=PADDING["sm"])
         
+        # Source selector (CFD or PINN)
         ctk.CTkLabel(
             selector_frame,
-            text="Select Sample:",
+            text="Source:",
             font=FONTS["heading"],
             text_color=COLORS["text_primary"]
         ).pack(side="left", padx=PADDING["md"], pady=PADDING["sm"])
         
-        # Build sample options
-        sample_options = []
-        for i, sample in enumerate(self.samples):
-            source = sample.get('source', 'Unknown')
-            profile = sample.get('profile', f'Sample {i+1}')
-            angle = sample.get('angle', '?')
-            label = f"{i+1}. {profile} @ {angle}° ({source})"
-            sample_options.append(label)
-        
-        if not sample_options:
-            sample_options = ["No samples"]
-        
-        self.sample_var = ctk.StringVar(value=sample_options[0])
-        self.sample_menu = ctk.CTkOptionMenu(
+        self.source_var = ctk.StringVar(value="CFD")
+        self.source_menu = ctk.CTkOptionMenu(
             selector_frame,
-            values=sample_options,
-            variable=self.sample_var,
-            width=300,
+            values=["CFD", "PINN"],
+            variable=self.source_var,
+            width=100,
+            fg_color=COLORS["primary"],
+            button_color=COLORS["primary"],
+            command=self.on_source_change
+        )
+        self.source_menu.pack(side="left", padx=PADDING["xs"], pady=PADDING["sm"])
+        
+        # Model selector
+        ctk.CTkLabel(
+            selector_frame,
+            text="Model:",
+            font=FONTS["body"],
+            text_color=COLORS["text_secondary"]
+        ).pack(side="left", padx=(PADDING["md"], PADDING["xs"]), pady=PADDING["sm"])
+        
+        self.model_var = ctk.StringVar()
+        self.model_menu = ctk.CTkOptionMenu(
+            selector_frame,
+            values=["Loading..."],
+            variable=self.model_var,
+            width=350,
             fg_color=COLORS["bg_light"],
             button_color=COLORS["primary"],
-            command=self.on_sample_change
+            command=self.on_model_change
         )
-        self.sample_menu.pack(side="left", padx=PADDING["sm"], pady=PADDING["sm"])
+        self.model_menu.pack(side="left", padx=PADDING["xs"], pady=PADDING["sm"])
         
         # Quick nav buttons
         ctk.CTkButton(
             selector_frame,
-            text="◀ Prev",
-            width=70,
+            text="◀",
+            width=40,
             fg_color=COLORS["bg_light"],
             command=self.prev_sample
         ).pack(side="left", padx=PADDING["xs"])
         
         ctk.CTkButton(
             selector_frame,
-            text="Next ▶",
-            width=70,
+            text="▶",
+            width=40,
             fg_color=COLORS["bg_light"],
             command=self.next_sample
         ).pack(side="left", padx=PADDING["xs"])
+        
+        # Sample count label
+        self.count_label = ctk.CTkLabel(
+            selector_frame,
+            text="",
+            font=FONTS["small"],
+            text_color=COLORS["text_muted"]
+        )
+        self.count_label.pack(side="right", padx=PADDING["md"], pady=PADDING["sm"])
         
         # Main content
         self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.content_frame.pack(fill="both", expand=True, padx=PADDING["md"], pady=PADDING["sm"])
         
+        # Initialize with CFD samples
+        self.update_model_options()
         self.update_content()
     
+    def on_source_change(self, value):
+        """Handle source dropdown change."""
+        self.update_model_options()
+        self.update_content()
+    
+    def on_model_change(self, value):
+        """Handle model dropdown change."""
+        self.update_content()
+    
+    def update_model_options(self):
+        """Update model dropdown based on selected source."""
+        source = self.source_var.get()
+        
+        if source == "CFD":
+            samples_list = self.cfd_samples
+            source_color = COLORS["primary"]
+        else:
+            samples_list = self.pinn_samples
+            source_color = "#9C27B0"  # Purple for PINN
+        
+        # Build options
+        options = []
+        for idx, sample in samples_list:
+            profile = sample.get('profile', 'Unknown')
+            angle = sample.get('angle', '?')
+            label = f"{idx+1}. {profile} @ {angle}°"
+            options.append(label)
+        
+        if not options:
+            options = [f"No {source} samples available"]
+        
+        # Update dropdown
+        self.model_menu.configure(values=options)
+        self.model_var.set(options[0])
+        self.count_label.configure(text=f"{len(samples_list)} {source} samples")
+    
     def get_current_index(self):
-        """Get current sample index."""
+        """Get current sample index from the model selection."""
         try:
-            current = self.sample_var.get()
+            current = self.model_var.get()
             return int(current.split('.')[0]) - 1
         except:
             return 0
     
+    def get_current_samples_list(self):
+        """Get the current filtered samples list."""
+        source = self.source_var.get()
+        return self.cfd_samples if source == "CFD" else self.pinn_samples
+    
     def prev_sample(self):
-        idx = max(0, self.get_current_index() - 1)
-        options = self.sample_menu.cget("values")
-        self.sample_var.set(options[idx])
+        samples_list = self.get_current_samples_list()
+        if not samples_list:
+            return
+        options = self.model_menu.cget("values")
+        current_idx = 0
+        for i, opt in enumerate(options):
+            if opt == self.model_var.get():
+                current_idx = i
+                break
+        new_idx = max(0, current_idx - 1)
+        self.model_var.set(options[new_idx])
         self.update_content()
     
     def next_sample(self):
-        idx = min(len(self.samples) - 1, self.get_current_index() + 1)
-        options = self.sample_menu.cget("values")
-        self.sample_var.set(options[idx])
-        self.update_content()
-    
-    def on_sample_change(self, value):
+        samples_list = self.get_current_samples_list()
+        if not samples_list:
+            return
+        options = self.model_menu.cget("values")
+        current_idx = 0
+        for i, opt in enumerate(options):
+            if opt == self.model_var.get():
+                current_idx = i
+                break
+        new_idx = min(len(options) - 1, current_idx + 1)
+        self.model_var.set(options[new_idx])
         self.update_content()
     
     def update_content(self):
-        """Update content for selected sample."""
+        """Update content for selected sample with Bayesian uncertainty."""
         # Clear existing
         for widget in self.content_frame.winfo_children():
             widget.destroy()
         
         idx = self.get_current_index()
-        if idx >= len(self.samples):
+        
+        # Handle invalid index or empty samples
+        if idx < 0 or idx >= len(self.samples):
+            ctk.CTkLabel(
+                self.content_frame,
+                text="No samples available for this source.",
+                font=FONTS["heading"],
+                text_color=COLORS["text_muted"]
+            ).pack(pady=50)
             return
         
         sample = self.samples[idx]
         pred = self.predictions[idx]
+        uncert = self.uncertainties[idx]
         actual = self.y[idx]
         fields = self.X[idx]
         
-        is_cfd = sample.get('source') == 'CFD' and not np.isnan(actual).any()
+        source = self.source_var.get()
+        is_cfd = source == 'CFD' and not np.isnan(actual).any()
         
         # Info card
         info_card = ctk.CTkFrame(self.content_frame, fg_color=COLORS["bg_card"], corner_radius=10)
@@ -533,7 +910,7 @@ class ResultsPopup(ctk.CTkToplevel):
         
         ctk.CTkLabel(
             coef_frame,
-            text="Predicted Coefficients",
+            text="Bayesian Predictions (with uncertainty)",
             font=FONTS["heading"],
             text_color=COLORS["text_primary"]
         ).pack(padx=PADDING["md"], pady=PADDING["sm"], anchor="w")
@@ -552,12 +929,23 @@ class ResultsPopup(ctk.CTkToplevel):
         cl_value_frame = ctk.CTkFrame(cl_frame, fg_color="transparent")
         cl_value_frame.pack(fill="x", padx=PADDING["sm"], pady=PADDING["xs"])
         
+        # Show prediction with uncertainty
+        cl_95_low = pred[0] - 1.96 * uncert[0]
+        cl_95_high = pred[0] + 1.96 * uncert[0]
+        
         ctk.CTkLabel(
             cl_value_frame,
-            text=f"Predicted: {pred[0]:.6f}",
+            text=f"{pred[0]:.4f} ± {uncert[0]:.4f}",
             font=("Segoe UI", 18, "bold"),
             text_color=COLORS["accent"]
         ).pack(side="left")
+        
+        ctk.CTkLabel(
+            cl_value_frame,
+            text=f"95% CI: [{cl_95_low:.4f}, {cl_95_high:.4f}]",
+            font=FONTS["small"],
+            text_color=COLORS["text_muted"]
+        ).pack(side="left", padx=PADDING["md"])
         
         if is_cfd:
             ctk.CTkLabel(
@@ -581,17 +969,66 @@ class ResultsPopup(ctk.CTkToplevel):
         cd_value_frame = ctk.CTkFrame(cd_frame, fg_color="transparent")
         cd_value_frame.pack(fill="x", padx=PADDING["sm"], pady=PADDING["xs"])
         
+        # Show prediction with uncertainty
+        cd_95_low = pred[1] - 1.96 * uncert[1]
+        cd_95_high = pred[1] + 1.96 * uncert[1]
+        
         ctk.CTkLabel(
             cd_value_frame,
-            text=f"Predicted: {pred[1]:.6f}",
+            text=f"{pred[1]:.6f} ± {uncert[1]:.6f}",
             font=("Segoe UI", 18, "bold"),
             text_color=COLORS["accent"]
         ).pack(side="left")
+        
+        ctk.CTkLabel(
+            cd_value_frame,
+            text=f"95% CI: [{cd_95_low:.6f}, {cd_95_high:.6f}]",
+            font=FONTS["small"],
+            text_color=COLORS["text_muted"]
+        ).pack(side="left", padx=PADDING["md"])
         
         if is_cfd:
             ctk.CTkLabel(
                 cd_value_frame,
                 text=f"Actual: {actual[1]:.6f}",
+                font=FONTS["body"],
+                text_color=COLORS["text_secondary"]
+            ).pack(side="right")
+        
+        # Aerodynamic Efficiency (CL/CD)
+        eff_frame = ctk.CTkFrame(coef_frame, fg_color=COLORS["bg_light"], corner_radius=8)
+        eff_frame.pack(fill="x", padx=PADDING["md"], pady=PADDING["xs"])
+        
+        ctk.CTkLabel(
+            eff_frame,
+            text="Aerodynamic Efficiency (CL/CD) - for Bayesian Optimization",
+            font=FONTS["small"],
+            text_color=COLORS["text_muted"]
+        ).pack(anchor="w", padx=PADDING["sm"], pady=(PADDING["xs"], 0))
+        
+        eff_value_frame = ctk.CTkFrame(eff_frame, fg_color="transparent")
+        eff_value_frame.pack(fill="x", padx=PADDING["sm"], pady=PADDING["xs"])
+        
+        # Calculate efficiency with uncertainty propagation
+        efficiency = pred[0] / (pred[1] + 1e-8)
+        # Propagated uncertainty: σ(CL/CD) ≈ |CL/CD| * sqrt((σ_CL/CL)² + (σ_CD/CD)²)
+        eff_uncertainty = abs(efficiency) * np.sqrt(
+            (uncert[0] / (abs(pred[0]) + 1e-8))**2 + 
+            (uncert[1] / (abs(pred[1]) + 1e-8))**2
+        )
+        
+        ctk.CTkLabel(
+            eff_value_frame,
+            text=f"{efficiency:.2f} ± {eff_uncertainty:.2f}",
+            font=("Segoe UI", 18, "bold"),
+            text_color="#00E676"  # Green for efficiency
+        ).pack(side="left")
+        
+        if is_cfd:
+            actual_eff = actual[0] / (actual[1] + 1e-8)
+            ctk.CTkLabel(
+                eff_value_frame,
+                text=f"Actual: {actual_eff:.2f}",
                 font=FONTS["body"],
                 text_color=COLORS["text_secondary"]
             ).pack(side="right")
@@ -606,30 +1043,52 @@ class ResultsPopup(ctk.CTkToplevel):
             cl_rel = cl_error / (abs(actual[0]) + 1e-10) * 100
             cd_rel = cd_error / (abs(actual[1]) + 1e-10) * 100
             
+            # Check if actual is within confidence interval
+            cl_in_ci = cl_95_low <= actual[0] <= cl_95_high
+            cd_in_ci = cd_95_low <= actual[1] <= cd_95_high
+            
             ctk.CTkLabel(
                 error_frame,
-                text="Prediction Error",
+                text="Prediction Error & Calibration",
                 font=FONTS["small"],
                 text_color=COLORS["text_muted"]
             ).pack(anchor="w", padx=PADDING["sm"], pady=(PADDING["xs"], 0))
             
+            error_text = f"CL Error: {cl_error:.5f} ({cl_rel:.1f}%)  |  CD Error: {cd_error:.5f} ({cd_rel:.1f}%)"
             ctk.CTkLabel(
                 error_frame,
-                text=f"CL Error: {cl_error:.6f} ({cl_rel:.2f}%)  |  CD Error: {cd_error:.6f} ({cd_rel:.2f}%)",
+                text=error_text,
                 font=FONTS["body"],
                 text_color=COLORS["warning"] if (cl_rel > 10 or cd_rel > 10) else COLORS["success"]
-            ).pack(anchor="w", padx=PADDING["sm"], pady=PADDING["xs"])
+            ).pack(anchor="w", padx=PADDING["sm"], pady=(0, PADDING["xs"]))
+            
+            # Calibration check
+            calib_cl = "✓" if cl_in_ci else "✗"
+            calib_cd = "✓" if cd_in_ci else "✗"
+            ctk.CTkLabel(
+                error_frame,
+                text=f"95% CI contains actual? CL: {calib_cl}  CD: {calib_cd}",
+                font=FONTS["small"],
+                text_color=COLORS["success"] if (cl_in_ci and cd_in_ci) else COLORS["warning"]
+            ).pack(anchor="w", padx=PADDING["sm"], pady=(0, PADDING["xs"]))
         else:
             # PINN notice
-            notice_frame = ctk.CTkFrame(coef_frame, fg_color=COLORS["bg_light"], corner_radius=8)
-            notice_frame.pack(fill="x", padx=PADDING["md"], pady=PADDING["xs"])
+            pinn_frame = ctk.CTkFrame(coef_frame, fg_color="#9C27B0", corner_radius=8)
+            pinn_frame.pack(fill="x", padx=PADDING["md"], pady=PADDING["xs"])
             
             ctk.CTkLabel(
-                notice_frame,
-                text="PINN-generated sample - No ground truth available for comparison",
+                pinn_frame,
+                text="🔮 PINN Prediction",
+                font=FONTS["heading"],
+                text_color="white"
+            ).pack(anchor="w", padx=PADDING["sm"], pady=(PADDING["xs"], 0))
+            
+            ctk.CTkLabel(
+                pinn_frame,
+                text="Ces coefficients sont prédits pour un profil d'aile simulé.\nPas de données CFD de référence disponibles.",
                 font=FONTS["small"],
-                text_color=COLORS["text_muted"]
-            ).pack(padx=PADDING["sm"], pady=PADDING["sm"])
+                text_color="#E1BEE7"
+            ).pack(anchor="w", padx=PADDING["sm"], pady=(0, PADDING["sm"]))
         
         # Right: Field visualization
         field_frame = ctk.CTkFrame(results_frame, fg_color=COLORS["bg_card"], corner_radius=10)

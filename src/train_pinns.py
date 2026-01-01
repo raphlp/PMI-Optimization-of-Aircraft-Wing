@@ -169,8 +169,9 @@ def train_pinns(naca_code="23015", angle_of_attack=0.0, epochs=2000,
     
     # Generate predictions on a grid for visualization
     print("\nGenerating flow field predictions...")
-    x_grid = np.linspace(-0.3, 1.5, 100)
-    y_grid = np.linspace(-0.5, 0.5, 50)
+    # Use 128x128 grid to match CFD processed data format
+    x_grid = np.linspace(-0.5, 2.0, 128)
+    y_grid = np.linspace(-1.0, 1.0, 128)
     X, Y = np.meshgrid(x_grid, y_grid)
     x_flat = X.flatten().astype(np.float32)
     y_flat = Y.flatten().astype(np.float32)

@@ -13,9 +13,7 @@ __pycache__/
 .DS_Store
 
 # Données source et générées
-data/raw/
-data/processed/
-
+data/
 # Modèles et fichiers volumineux
 *.npy
 *.h5

@@ -170,8 +170,13 @@ def extract_single_case(folder_path, output_dir, grid_size=128):
     # Interpolate to grid
     fields = interpolate_to_grid(df, grid_size)
     
-    # Create output directory
-    case_dir = os.path.join(output_dir, "cfd", profile, f"AoA_{aoa}")
+    # Create output directory - use original folder name for Unknown profiles
+    # to prevent overwriting when multiple cases have same profile/angle
+    if profile == "Unknown":
+        case_id = folder_name  # Use original name like "airfrans_0001"
+        case_dir = os.path.join(output_dir, "cfd", case_id, f"AoA_{aoa}")
+    else:
+        case_dir = os.path.join(output_dir, "cfd", profile, f"AoA_{aoa}")
     os.makedirs(case_dir, exist_ok=True)
     
     # Save fields
