@@ -1078,14 +1078,14 @@ class ResultsPopup(ctk.CTkToplevel):
             
             ctk.CTkLabel(
                 pinn_frame,
-                text="🔮 PINN Prediction",
+                text="PINN Prediction",
                 font=FONTS["heading"],
                 text_color="white"
             ).pack(anchor="w", padx=PADDING["sm"], pady=(PADDING["xs"], 0))
             
             ctk.CTkLabel(
                 pinn_frame,
-                text="Ces coefficients sont prédits pour un profil d'aile simulé.\nPas de données CFD de référence disponibles.",
+                text="These coefficients are predicted for a simulated airfoil profile.\nNo ground truth CFD data available for comparison.",
                 font=FONTS["small"],
                 text_color="#E1BEE7"
             ).pack(anchor="w", padx=PADDING["sm"], pady=(0, PADDING["sm"]))

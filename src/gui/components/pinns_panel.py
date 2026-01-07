@@ -72,14 +72,22 @@ class PINNsPanel(ctk.CTkFrame):
             text_color=COLORS["text_primary"]
         ).pack(padx=PADDING["md"], pady=(PADDING["sm"], 0), anchor="w")
         
+        # Scrollable list for profiles
+        self.profiles_scroll = ctk.CTkScrollableFrame(
+            status_card, 
+            height=120, 
+            fg_color="transparent"
+        )
+        self.profiles_scroll.pack(fill="x", padx=PADDING["sm"], pady=PADDING["sm"])
+        
         self.status_label = ctk.CTkLabel(
-            status_card,
+            self.profiles_scroll,
             text="Checking...",
             font=FONTS["body"],
             text_color=COLORS["text_secondary"],
             justify="left"
         )
-        self.status_label.pack(padx=PADDING["md"], pady=(PADDING["xs"], PADDING["sm"]), anchor="w")
+        self.status_label.pack(anchor="w")
         
         # Configuration
         config_card = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10)
@@ -262,24 +270,47 @@ class PINNsPanel(ctk.CTkFrame):
         profiles = self.get_cfd_profiles()
         pinn_cases = self.get_pinn_cases()
         
+        # Clear scrollable list
+        for widget in self.profiles_scroll.winfo_children():
+            widget.destroy()
+            
         if not profiles:
-            self.status_label.configure(
+            ctk.CTkLabel(
+                self.profiles_scroll,
                 text="No CFD profiles found.\nFirst extract data in CFD tab.",
+                font=FONTS["body"],
                 text_color=COLORS["warning"]
-            )
+            ).pack(anchor="w")
+            
             self.profile_menu.configure(values=["No profiles"], state="disabled")
             self.generate_btn.configure(state="disabled", fg_color=COLORS["bg_light"])
             self.log("No CFD data. Use CFD tab first.")
         else:
-            status_text = f"{len(profiles)} profile(s) available:\n"
+            header_text = f"{len(profiles)} profile(s) available:"
+            ctk.CTkLabel(
+                self.profiles_scroll,
+                text=header_text,
+                font=("Segoe UI", 12, "bold"),
+                text_color=COLORS["success"]
+            ).pack(anchor="w", pady=(0, 5))
+            
             for profile, angles in profiles.items():
                 angles_str = ", ".join(f"{a}°" for a in angles)
-                status_text += f"  • {profile}: {angles_str}\n"
+                ctk.CTkLabel(
+                    self.profiles_scroll,
+                    text=f"• {profile}: {angles_str}",
+                    font=FONTS["body"],
+                    text_color=COLORS["text_secondary"]
+                ).pack(anchor="w")
             
             if pinn_cases:
-                status_text += f"\nPINN generated: {len(pinn_cases)} case(s)"
+                ctk.CTkLabel(
+                    self.profiles_scroll,
+                    text=f"\nPINN generated: {len(pinn_cases)} case(s)",
+                    font=FONTS["small"],
+                    text_color=COLORS["primary"]
+                ).pack(anchor="w", pady=(5, 0))
             
-            self.status_label.configure(text=status_text.strip(), text_color=COLORS["success"])
             self.profile_menu.configure(values=list(profiles.keys()), state="normal")
             self.profile_var.set(list(profiles.keys())[0])
             self.generate_btn.configure(state="normal", fg_color="#9C27B0")

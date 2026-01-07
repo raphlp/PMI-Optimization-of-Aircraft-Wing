@@ -1,6 +1,6 @@
 # PMI Project - Data Structure
 
-## 📁 Organisation des données
+## Organisation des données
 
 ```
 data/
@@ -23,7 +23,7 @@ data/
     └── cnn_model.keras               # Modèle entraîné
 ```
 
-## 📝 Convention de nommage
+## Convention de nommage
 
 Format: `{PROFIL}_AoA{ANGLE}`
 
@@ -33,7 +33,7 @@ Format: `{PROFIL}_AoA{ANGLE}`
 | `NACA23015_AoA5` | Profil NACA 23015, angle 5° |
 | `NACA0012_AoA-2` | Profil NACA 0012, angle -2° |
 
-## 📊 Contenu de `fields.csv`
+## Contenu de `fields.csv`
 
 Export Fluent ASCII avec colonnes :
 - `cellnumber` - ID de cellule
@@ -44,7 +44,7 @@ Export Fluent ASCII avec colonnes :
 - `x-velocity` - Vitesse U
 - `y-velocity` - Vitesse V
 
-## 🎯 Comment ajouter une simulation
+## Comment ajouter une simulation
 
 1. Créer un dossier dans `data/raw/` avec le bon nom
 2. Y mettre :
